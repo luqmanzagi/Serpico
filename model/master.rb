@@ -26,6 +26,7 @@ class TemplateFindings
   property :approved, Boolean, required: false, default: true
   property :risk, Integer, required: false
   property :affected_hosts, String, length: 20_000, required: false
+
   # CVSSv2
   property :av, String, required: false
   property :ac, String, required: false
@@ -84,6 +85,14 @@ class TemplateFindings
   property :likelihood, String, required: false
   property :severity_rationale, String, length: 20_000, required: false
   property :likelihood_rationale, String, length: 20_000, required: false
+
+  # NIST800
+  property :nist_impact, String, :required => false
+  property :nist_likelihood, String, :required => false
+  property :nist800_total, Float, :required => false
+  property :impact_val, Float, :required => false
+  property :likelihood_val, Float, :required => false
+  property :nist_rating, String, :required => false
 
   property :language, String, required: false
 end
@@ -174,6 +183,14 @@ class Findings
   property :likelihood, String, required: false
   property :severity_rationale, String, length: 20_000, required: false
   property :likelihood_rationale, String, length: 20_000, required: false
+
+  # NIST800
+  property :nist_impact, String, :required => false
+  property :nist_likelihood, String, :required => false
+  property :nist800_total, Float, :required => false
+  property :impact_val, Float, :required => false
+  property :likelihood_val, Float, :required => false
+  property :nist_rating, String, :required => false
 
   property :language, String, required: false
 end
@@ -347,7 +364,7 @@ class Attachments
   property :filename_location, String, length: 400
   property :report_id, String, length: 30
   property :description, String, length: 500
-  property :caption, String, length: 500
+  property :appendice, Boolean
 end
 
 class Charts

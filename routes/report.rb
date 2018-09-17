@@ -289,7 +289,7 @@ post '/report/:id/upload_attachments' do
     datax['filename'] = upf[:filename]
     datax['description'] = CGI.escapeHTML(upf[:filename]).tr(' ', '_').tr('/', '_').tr('\\', '_').tr('`', '_')
     datax['report_id'] = id
-    datax['caption'] = params[:caption]
+    datax['appendice'] = params[:appendice]
     data = url_escape_hash(datax)
 
     @attachment = Attachments.new(data)
@@ -371,10 +371,10 @@ get '/report/:id/edit' do
   # Query for the first report matching the report_name
   @report = get_report(id)
   @templates = Xslt.all(order: [:report_type.asc])
-  @plugin_side_menu = get_plugin_list
+  @plugin_side_menu = get_plugin_list('user')
   @assessment_types = config_options['report_assessment_types']
   @languages = config_options['languages']
-  @risk_scores = %w[Risk DREAD CVSS CVSSv3 RiskMatrix]
+  @risk_scores = %w[Risk DREAD CVSS CVSSv3 RiskMatrix NIST800]
 
   return 'No Such Report' if @report.nil?
 
@@ -400,7 +400,8 @@ post '/report/:id/edit' do
   id = params[:id]
 
   data = url_escape_hash(request.POST)
-
+  #preventing values from degenerating with & double encoding
+  data = data.map{ |param,value| [param, value.gsub('&amp;', '&')]}
   @report = get_report(id)
 
   unless @report.update(data)
@@ -567,30 +568,30 @@ get '/report/:id/user_defined_variables' do
   haml :user_defined_variable, encode_html: true
 end
 
-# Post user defined variables
+# TODO: this route needs proper comments, it is very confusing
 post '/report/:id/user_defined_variables' do
   data = url_escape_hash(request.POST)
 
-  # quick fix for udv not in paragraph when on only one line
-
   data.each do |k, v|
     if k =~ /variable_data/ && (v !~ /\<paragraph\>/)
-      data[k] = "<paragraph>#{v}</paragraph>"
+      data[k.strip] = "<paragraph>#{v}</paragraph>"
     end
   end
 
   variable_hash = {}
   data.each do |k, v|
     if k =~ /variable_name/
-      key = k.split('variable_name_').last.split('_').first
+      key = k.split('variable_name_').last.split('_').first.strip
 
-      # remove certain elements from name %&"<>
       v = v.tr('%', '_').gsub('&quot;', "'").gsub('&amp;', '').gsub('&gt;', '').gsub('&lt;', '')
+
       variable_hash["#{key}%#{v}"] = 'DEFAULT'
 
     end
+
+    # TODO are the next few lines ever hit? 
     next unless k =~ /variable_data/
-    key = k.split('variable_data_').last.split('_').first
+    key = k.split('variable_data_').last.split('_').first.strip
 
     variable_hash.each do |k1, _v1|
       next unless k1 =~ /%/
@@ -599,15 +600,13 @@ post '/report/:id/user_defined_variables' do
     end
   end
 
-  # remove the % and any blank values
   q = variable_hash.clone
   variable_hash.each do |k, v|
     next unless k =~ /%/
-    p k.split('%')
     if k.split('%').size == 1
       q.delete(k)
     else
-      q[k.split('%').last] = v
+      q[k.split('%').last.strip] = v
       q.delete(k)
     end
   end
@@ -629,13 +628,13 @@ get '/report/:id/findings' do
 
   # Query for the first report matching the report_name
   @report = get_report(id)
-  @plugin_side_menu = get_plugin_list
+  @plugin_side_menu = get_plugin_list('user')
 
   return 'No Such Report' if @report.nil?
 
   @report.update(scoring: set_scoring(config_options)) unless @report.scoring
 
-  @findings, @dread, @cvss, @cvssv3, @risk, @riskmatrix = get_scoring_findings(@report)
+  @findings, @dread, @cvss, @cvssv3, @risk, @riskmatrix,@nist800 = get_scoring_findings(@report)
 
   @cvssv2_scoring_override = if config_options.key?('cvssv2_scoring_override')
                                config_options['cvssv2_scoring_override']
@@ -654,7 +653,7 @@ get '/report/:id/status' do
 
   return 'No Such Report' if @report.nil?
 
-  @findings, @dread, @cvss, @cvssv3, @risk, @riskmatrix = get_scoring_findings(@report)
+  @findings, @dread, @cvss, @cvssv3, @risk, @riskmatrix,@nist800 = get_scoring_findings(@report)
 
   ## We have to do some hackery here for wordml
   findings_xml = ''
@@ -786,6 +785,7 @@ post '/report/:id/findings_add' do
     # because of multiple scores we need to make sure all are set
     # => leave it up to the user to make the calculation if they switch mid report
     @newfinding.dread_total = 0 if @newfinding.dread_total.nil?
+    @newfinding.nist800_total = 0 if @newfinding.nist800_total == nil
     @newfinding.cvss_total = 0  if @newfinding.cvss_total.nil?
     @newfinding.risk = 0 if @newfinding.risk.nil?
 
@@ -813,7 +813,7 @@ post '/report/:id/findings_add' do
 
   serpico_log("#{@newfinding.title} added to report #{id}")
 
-  @findings, @dread, @cvss, @cvssv3, @risk, @riskmatrix = get_scoring_findings(@report)
+  @findings, @dread, @cvss, @cvssv3, @risk, @riskmatrix,@nist800 = get_scoring_findings(@report)
 
   haml :findings_list, encode_html: true
 end
@@ -832,7 +832,7 @@ get '/report/:id/findings/new' do
     @attaches.push(ta.description)
   end
 
-  @findings, @dread, @cvss, @cvssv3, @risk, @riskmatrix = get_scoring_findings(@report)
+  @findings, @dread, @cvss, @cvssv3, @risk, @riskmatrix,@nist800 = get_scoring_findings(@report)
 
   haml :create_finding, encode_html: true
 end
@@ -853,6 +853,9 @@ post '/report/:id/findings/new' do
     data = cvss(data, false)
   elsif @report.scoring.casecmp('cvssv3').zero?
     data = cvss(data, true)
+  elsif(@report.scoring.downcase == "nist800")
+    # call nist800 helper function
+    data = nist800(data)
   end
 
   data['report_id'] = id
@@ -862,7 +865,9 @@ post '/report/:id/findings/new' do
 
   # because of multiple scores we need to make sure all are set
   # => leave it up to the user to make the calculation if they switch mid report
+
   @finding.dread_total = 0 if @finding.dread_total.nil?
+  @finding.nist800_total = 0 if @finding.nist800_total == nil
   @finding.cvss_total = 0 if @finding.cvss_total.nil?
   @finding.risk = 0 if @finding.risk.nil?
   @finding.save
@@ -895,7 +900,7 @@ get '/report/:id/findings/:finding_id/edit' do
     @attaches.push(ta.description)
   end
 
-  @findings, @dread, @cvss, @cvssv3, @risk, @riskmatrix = get_scoring_findings(@report)
+  @findings, @dread, @cvss, @cvssv3, @risk, @riskmatrix,@nist800 = get_scoring_findings(@report)
 
   haml :findings_edit, encode_html: true
 end
@@ -930,6 +935,9 @@ post '/report/:id/findings/:finding_id/edit' do
     data = cvss(data, false)
   elsif @report.scoring.casecmp('cvssv3').zero?
     data = cvss(data, true)
+  elsif(@report.scoring.downcase == "nist800")
+    # call nist800 helper function
+    data = nist800(data)
   end
 
   # Update the finding with templated finding stuff
@@ -944,6 +952,7 @@ post '/report/:id/findings/:finding_id/edit' do
   # because of multiple scores we need to make sure all are set
   # => leave it up to the user to make the calculation if they switch mid report
   @finding.dread_total = 0 if @finding.dread_total.nil?
+  @finding.nist800_total = 0 if @finding.nist800_total == nil
   @finding.cvss_total = 0 if @finding.cvss_total.nil?
   @finding.risk = 0 if @finding.risk.nil?
   @finding.save
@@ -978,6 +987,7 @@ get '/report/:id/findings/:finding_id/upload' do
     affected_users: @finding.affected_users,
     discoverability: @finding.discoverability,
     dread_total: @finding.dread_total,
+    nist800_total: @finding.nist800_total,
     cvss_base: @finding.cvss_base,
     cvss_impact: @finding.cvss_impact,
     cvss_exploitability: @finding.cvss_exploitability,
@@ -1184,7 +1194,7 @@ get '/report/:id/generate' do
   end
   @report.save
 
-  @findings, @dread, @cvss, @cvssv3, @risk, @riskmatrix = get_scoring_findings(@report)
+  @findings, @dread, @cvss, @cvssv3, @risk, @riskmatrix,@nist800 = get_scoring_findings(@report)
 
   ## We have to do some hackery here for wordml
   findings_xml = ''
@@ -1292,8 +1302,21 @@ get '/report/:id/generate' do
       hosts_xml = hosts_xml_raw.doc.root.to_xml
     end
   end
+  # we add the xml from the attachments the user added
+  all_appendices_xml = "<appendices>\n"
+  all_appendices = Attachments.all(report_id: id, appendice: true)
+  all_appendices.each do |appendice|
+    next unless File.file?(appendice.filename_location)
+    # the filename without the extension becomes the xml tag
+    appendice_xml = "<#{appendice.filename.split('.')[0]}>"
+    appendice_xml += Nokogiri::XML(File.open(appendice.filename_location).read).root.to_xml
+    appendice_xml += "</#{appendice.filename.split('.')[0]}>"
+    all_appendices_xml += appendice_xml.to_s
+
+  end
+  all_appendices_xml += "</appendices>\n"
   # we bring all xml together
-  report_xml = "<report>#{@report.to_xml}#{udv}#{findings_xml}#{udo_xml}#{services_xml}#{hosts_xml}</report>"
+  report_xml = "<report>#{CGI.unescapeHTML(@report.to_xml)}#{udv}#{findings_xml}#{udo_xml}#{services_xml}#{hosts_xml}#{all_appendices_xml}</report>"
   noko_report_xml = Nokogiri::XML(report_xml)
   #no use to go on with report generation if report XML is malformed
   if !noko_report_xml.errors.empty?
@@ -1561,7 +1584,7 @@ get '/report/:id/presentation' do
   # bail without a report
   redirect to('/') unless @report
 
-  @findings, @dread, @cvss, @cvssv3, @risk, @riskmatrix = get_scoring_findings(@report)
+  @findings, @dread, @cvss, @cvssv3, @risk, @riskmatrix,@nist800  = get_scoring_findings(@report)
 
   # add images into presentations
   @images = []
@@ -1662,6 +1685,7 @@ get '/report/:id/presentation_export' do
     f.write htmlDoc
   end
 
+  @findings,@dread,@cvss,@cvssv3,@risk,@riskmatrix,@nist800 = get_scoring_findings(@report)
   rand_zip = Dir.pwd + "/tmp/#{rand(36**12).to_s(36)}.zip"
 
   # put the presentation and its dependencies (links, images, libraries...) in a zip file

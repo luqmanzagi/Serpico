@@ -32,6 +32,7 @@ get '/admin/pull' do
 
   if File.exist?('./export.zip')
     send_file './export.zip', filename: 'export.zip', type: 'Application/octet-stream'
+    serpico_log("Copy of code exported")
   else
     'No copy of the code available. Run scripts/make_export.sh.'
   end
@@ -45,6 +46,7 @@ get '/admin/dbbackup' do
   FileUtils.copy_file('./db/master.db', filename)
   if !File.zero?(filename)
     send_file filename, filename: filename.to_s, type: 'Application/octet-stream'
+    serpico_log("DB backup created")
   else
     'No copy of the database is available. Please try again.'
     sleep(5)
@@ -63,6 +65,7 @@ get '/admin/attacments_backup' do
   end
   send_file zip_file, type: 'zip', filename: zip_file
   # File.delete(rand_zip) should the temp file be deleted?
+  serpico_log("Backup of attachments created")
 end
 
 # Create a new user
@@ -153,7 +156,7 @@ post '/admin/add_user/:id' do
 
   report.authors = authors
   report.save
-
+  serpico_log("User added to report")
   redirect to("/admin/add_user/#{params[:id]}")
 end
 
@@ -173,7 +176,7 @@ get '/admin/del_user_report/:id/:author' do
 
   report.authors = authors
   report.save
-
+  serpico_log("User removed from report")
   redirect to("/admin/add_user/#{params[:id]}")
 end
 
@@ -189,7 +192,9 @@ get '/admin/config' do
                'dread'
              elsif config_options['riskmatrix']
                'riskmatrix'
-             else
+             elsif config_options["nist800"]
+               'nist800'
+              else
                'default'
              end
 
@@ -231,30 +236,42 @@ post '/admin/config' do
     config_options['cvss'] = true
     config_options['cvssv3'] = false
     config_options['riskmatrix'] = false
+    config_options['nist800'] = false
   elsif params['risk_scoring'] == 'CVSSv3'
     config_options['dread'] = false
     config_options['cvss'] = false
     config_options['cvssv3'] = true
     config_options['riskmatrix'] = false
+    config_options['nist800'] = false
   elsif params['risk_scoring'] == 'DREAD'
     config_options['dread'] = true
     config_options['cvss'] = false
     config_options['cvssv3'] = false
     config_options['riskmatrix'] = false
+    config_options['nist800'] = false
   elsif params['risk_scoring'] == 'RISKMATRIX'
     config_options['dread'] = false
     config_options['cvss'] = false
     config_options['cvssv3'] = false
     config_options['riskmatrix'] = true
+    config_options['nist800'] = false
+  elsif params['risk_scoring'] == 'NIST800-30'
+  	config_options['dread'] = false
+    config_options['cvss'] = false
+    config_options['cvssv3'] = false
+    config_options['riskmatrix'] = false
+    config_options['nist800'] = true
   else
     config_options['dread'] = false
     config_options['cvss'] = false
     config_options['cvssv3'] = false
     config_options['riskmatrix'] = false
+    config_options['nist800'] = false
   end
 
   File.open('./config.json', 'w') do |f|
     f.write(JSON.pretty_generate(config_options))
+    serpico_log("Configuration file modified")
   end
   redirect to('/admin/config')
 end
@@ -288,11 +305,13 @@ post '/admin/plugins' do
       plug['enabled'] = true
       File.open("./plugins/#{plug['name']}/plugin.json", 'w') do |f|
         f.write(JSON.pretty_generate(plug))
+        serpico_log("Plugin #{plug['name']} enabled")
       end
     else
       plug['enabled'] = false
       File.open("./plugins/#{plug['name']}/plugin.json", 'w') do |f|
         f.write(JSON.pretty_generate(plug))
+        serpico_log("Plugin #{plug['name']} disabled")
       end
     end
   end
@@ -324,6 +343,7 @@ post '/admin/plugin_upload' do
         if entry.name == 'plugin.json'
           configj = entry.get_input_stream.read
           config = JSON.parse(configj)
+          serpico_log("Custom plugin uploaded")
         end
       end
     end
@@ -396,6 +416,7 @@ get '/admin/delete/templates/:id' do
     @xslt.destroy
     File.delete(@xslt.xslt_location) if File.file?(@xslt.xslt_location)
     File.delete(@xslt.docx_location) if File.file?(@xslt.docx_location)
+    serpico_log("Report template deleted")
   end
   redirect to('/admin/templates')
 end
@@ -423,6 +444,10 @@ post '/admin/templates/add' do
   begin
     xslt = generate_xslt(docx)
     xslt_components = generate_xslt_components(docx)
+  rescue TemplateVerificationError => detail
+    @error_message = CGI::escapeHTML(detail.errorString)
+    @tree = CGI::escapeHTML(detail.template_tree)
+    return haml :template_error, encode_html: true
   rescue ReportingError => detail
     error = true
   end
@@ -472,17 +497,28 @@ post '/admin/templates/add' do
       @component = Xslt_component.new(component)
       @component.save
     end
+    serpico_log("New report template successfully added")
     redirect to('/admin/templates')
 
     haml :add_template, encode_html: true
   end
 end
 
+get '/admin/templates/:id/tree' do
+  redirect to('/no_access') unless is_administrator?
+  @admin = true
+  xslt = Xslt.first(id: params[:id])
+  document = read_rels(xslt.docx_location,"word/document.xml")
+  @tree = verify_document(document)
+  @tree = @tree[2]
+
+  haml :template_tree, encode_html: true
+end
 # Manage Templated Reports
 get '/admin/templates/:id/edit' do
   redirect to('/no_access') unless is_administrator?
 
-  @admind = true
+  @admin = true
   @template = Xslt.first(id: params[:id])
 
   haml :edit_template, encode_html: true
@@ -510,11 +546,15 @@ post '/admin/templates/edit' do
   error = false
   detail = ''
   begin
-      xslt = generate_xslt(docx)
-      xslt_components = generate_xslt_components(docx)
-    rescue ReportingError => detail
-      error = true
-    end
+    xslt = generate_xslt(docx)
+    xslt_components = generate_xslt_components(docx)
+  rescue TemplateVerificationError => detail
+    @error_message = CGI::escapeHTML(detail.errorString)
+    @tree = CGI::escapeHTML(detail.template_tree)
+    return haml :template_error, encode_html: true
+  rescue ReportingError => detail
+    error = true
+  end
 
   if error
     "The report template you uploaded threw an error when parsing:<p><p> #{detail.errorString}"
@@ -562,23 +602,14 @@ post '/admin/templates/edit' do
       @component = Xslt_component.new(component)
       @component.save
     end
+    serpico_log("Report template modified")
     redirect to('/admin/templates')
 end
 end
 
 # get enabled plugins
 get '/admin/admin_plugins' do
-  @menu = []
-  Dir[File.join(File.dirname(__FILE__), '../plugins/**/', '*.json')].each do |lib|
-    pl = JSON.parse(File.open(lib).read)
-    a = {}
-    next unless pl['enabled'] && pl['admin_view']
-    # add the plugin to the menu
-    a['name'] = pl['name']
-    a['description'] = pl['description']
-    a['link'] = pl['link']
-    @menu.push(a)
-  end
+  @menu = get_plugin_list('admin')
   haml :enabled_plugins, encode_html: true
 end
 
@@ -617,6 +648,7 @@ post '/admin/udo_templates' do
   @udos_templates = UserDefinedObjectTemplates.all
 
   haml :user_defined_object_templates, encode_html: true
+  serpico_log("UDO template added")
 end
 
 # edit udo template
@@ -666,5 +698,6 @@ post '/admin/udo_template/:template_id/edit' do
   end
   @udo_to_edit.udo_properties = udo_properties.to_json
   @udo_to_edit.save
+  serpico_log("UDO template modified")
   redirect to('/admin/udo_templates')
 end
